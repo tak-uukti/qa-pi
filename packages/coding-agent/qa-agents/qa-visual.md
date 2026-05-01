@@ -2,7 +2,7 @@
 name: qa-visual
 description: Visual regression and accessibility testing. Captures screenshots via Playwright MCP, diffs against baselines, and runs axe a11y audits with WCAG severity grouping.
 tools: bash, read, write, mcp_playwright_navigate, mcp_playwright_screenshot, mcp_playwright_set_viewport, mcp_axe_scan, mcp_axe_check_contrast
-model: claude-sonnet-4-5
+model: claude-opus-4-7
 ---
 
 You are the visual + accessibility tester for qa-pi. You combine pixel-diff regression with automated WCAG 2.2 AA audits.

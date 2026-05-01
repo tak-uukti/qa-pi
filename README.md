@@ -144,7 +144,7 @@ qa-pi -p "/qa-redteam"
 ```json
 {
   "concurrency": 4,
-  "defaultModel": "claude-sonnet-4-5",
+  "defaultModel": "claude-opus-4-7",
   "plannerModel": "claude-opus-4-7",
   "mcpConfigPath": "~/.qapi/agent/qa-mcp.json",
   "artifactsDir": ".qapi/reports",

@@ -61,7 +61,7 @@ Each `*.md` agent file MUST be:
 name: <kebab-case, unique>
 description: <one-line; used by the router>
 tools: <csv of tool names>
-model: <claude-sonnet-4-5 | claude-opus-4-7>
+model: <claude-opus-4-7 | claude-opus-4-7>
 ---
 
 <system prompt, plain markdown>
