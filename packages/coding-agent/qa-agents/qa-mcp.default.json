@@ -1,0 +1,46 @@
+{
+  "$schema": "https://github.com/tak-uukti/qa-pi/schemas/qa-mcp.json",
+  "_comment": "Default MCP server registry for qa-pi. Copied to ~/.qapi/agent/qa-mcp.json on first run; edit there. Set 'disabled': true to skip.",
+  "servers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"]
+    },
+    "chrome-devtools": {
+      "command": "npx",
+      "args": ["-y", "chrome-devtools-mcp@latest"]
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    },
+    "git": {
+      "command": "uvx",
+      "args": ["mcp-server-git"]
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      },
+      "disabled": false
+    },
+    "time": {
+      "command": "uvx",
+      "args": ["mcp-server-time"]
+    },
+    "axe": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-everything"],
+      "_note": "No official axe MCP yet — qa-visual subagent shells to `npx -y @axe-core/cli` directly. Replace this entry if a maintained axe MCP appears.",
+      "disabled": true
+    },
+    "nuclei": {
+      "command": "npx",
+      "args": ["-y", "mcp-server-nuclei"],
+      "_note": "Optional. Install nuclei binary first: `go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest`",
+      "disabled": true
+    }
+  }
+}

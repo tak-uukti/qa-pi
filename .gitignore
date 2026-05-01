@@ -38,3 +38,5 @@ plans/
 .pi/hf-sessions/
 .pi/hf-sessions-backup/
 collect.sh
+package-lock.json
+dist/

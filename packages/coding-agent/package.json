@@ -1,13 +1,14 @@
 {
-	"name": "@mariozechner/pi-coding-agent",
-	"version": "0.71.1",
-	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
+	"name": "@tak-uukti/qa-pi",
+	"version": "0.1.0",
+	"description": "qa-pi \u2014 QA-specialized fork of pi-coding-agent. 7 testing subagents (planner/web/api/visual/perf/security/redteam) + MCP bridge.",
 	"type": "module",
 	"piConfig": {
-		"configDir": ".pi"
+		"name": "qa-pi",
+		"configDir": ".qapi"
 	},
 	"bin": {
-		"pi": "dist/cli.js"
+		"qa-pi": "dist/cli.js"
 	},
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
@@ -25,7 +26,9 @@
 		"dist",
 		"docs",
 		"examples",
-		"CHANGELOG.md"
+		"CHANGELOG.md",
+		"qa-extension",
+		"qa-agents"
 	],
 	"scripts": {
 		"clean": "shx rm -rf dist",
@@ -35,7 +38,8 @@
 		"copy-assets": "shx mkdir -p dist/modes/interactive/theme && shx cp src/modes/interactive/theme/*.json dist/modes/interactive/theme/ && shx mkdir -p dist/modes/interactive/assets && shx cp src/modes/interactive/assets/*.png dist/modes/interactive/assets/ && shx mkdir -p dist/core/export-html/vendor && shx cp src/core/export-html/template.html src/core/export-html/template.css src/core/export-html/template.js dist/core/export-html/ && shx cp src/core/export-html/vendor/*.js dist/core/export-html/vendor/",
 		"copy-binary-assets": "shx cp package.json dist/ && shx cp README.md dist/ && shx cp CHANGELOG.md dist/ && shx mkdir -p dist/theme && shx cp src/modes/interactive/theme/*.json dist/theme/ && shx mkdir -p dist/assets && shx cp src/modes/interactive/assets/*.png dist/assets/ && shx mkdir -p dist/export-html/vendor && shx cp src/core/export-html/template.html dist/export-html/ && shx cp src/core/export-html/vendor/*.js dist/export-html/vendor/ && shx cp -r docs dist/ && shx cp -r examples dist/ && shx cp ../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm dist/",
 		"test": "vitest --run",
-		"prepublishOnly": "npm run clean && npm run build"
+		"prepublishOnly": "npm run clean && npm run build",
+		"postinstall": "node scripts/qa-postinstall.mjs || true"
 	},
 	"dependencies": {
 		"@mariozechner/jiti": "^2.6.2",
@@ -80,21 +84,29 @@
 		"vitest": "^3.2.4"
 	},
 	"keywords": [
+		"qa",
+		"testing",
+		"playwright",
+		"accessibility",
+		"a11y",
+		"security",
+		"redteam",
+		"mcp",
+		"pi",
 		"coding-agent",
-		"ai",
-		"llm",
-		"cli",
-		"tui",
-		"agent"
+		"llm"
 	],
-	"author": "Mario Zechner",
+	"author": "Tak1tak <hello@bytak.in> (https://bytak.in)",
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/badlogic/pi-mono.git",
-		"directory": "packages/coding-agent"
+		"url": "git+https://github.com/tak-uukti/qa-pi.git"
 	},
 	"engines": {
 		"node": ">=20.6.0"
+	},
+	"homepage": "https://github.com/tak-uukti/qa-pi#readme",
+	"bugs": {
+		"url": "https://github.com/tak-uukti/qa-pi/issues"
 	}
 }

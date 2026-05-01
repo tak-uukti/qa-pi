@@ -3,12 +3,7 @@
 	"private": true,
 	"type": "module",
 	"workspaces": [
-		"packages/*",
-		"packages/web-ui/example",
-		"packages/coding-agent/examples/extensions/with-deps",
-		"packages/coding-agent/examples/extensions/custom-provider-anthropic",
-		"packages/coding-agent/examples/extensions/custom-provider-gitlab-duo",
-		"packages/coding-agent/examples/extensions/sandbox"
+		"packages/*"
 	],
 	"scripts": {
 		"clean": "npm run clean --workspaces",

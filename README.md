@@ -1,78 +1,178 @@
-<p align="center">
-  <a href="https://pi.dev">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://pi.dev/logo.svg">
-      <source media="(prefers-color-scheme: light)" srcset="https://huggingface.co/buckets/julien-c/my-training-bucket/resolve/pi-logo-dark.svg">
-      <img alt="pi logo" src="https://pi.dev/logo.svg" width="128">
-    </picture>
-  </a>
-</p>
-<p align="center">
-  <a href="https://discord.com/invite/3cU7Bz4UPx"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
-  <a href="https://github.com/badlogic/pi-mono/actions/workflows/ci.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/badlogic/pi-mono/ci.yml?style=flat-square&branch=main" /></a>
-</p>
-<p align="center">
-  <a href="https://pi.dev">pi.dev</a> domain graciously donated by
-  <br /><br />
-  <a href="https://exe.dev"><img src="packages/coding-agent/docs/images/exy.png" alt="Exy mascot" width="48" /><br />exe.dev</a>
-</p>
+## Overview
 
-> New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
+`qa-pi` is a QA-specialized fork of [pi-mono](https://github.com/badlogic/pi-mono)'s `pi-coding-agent` by [@badlogic](https://github.com/badlogic). It keeps the original TUI, sessions, skills, and extension system — but ships preconfigured for one job: testing software.
 
----
+It bundles:
 
-# Pi Monorepo
+- **7 specialized subagents** — planner, web e2e, API contract, visual + a11y, performance, security, red-team.
+- **An MCP-bridge extension** that spawns Playwright, Chrome DevTools, axe, filesystem, git, github, time, and nuclei MCP servers and exposes their tools as native pi tools.
+- **A test harness layout** under `tests/{e2e,api,visual,perf,security}/` and a `.qapi/` scope/config directory.
 
-> **Looking for the pi coding agent?** See **[packages/coding-agent](packages/coding-agent)** for installation and usage.
+Each subagent runs in its own isolated `pi` child process with a least-privilege tools allowlist.
 
-Tools for building AI agents.
+## Why qa-pi vs vanilla pi
 
-## Share your OSS coding agent sessions
+| Concern | vanilla pi | qa-pi |
+|---------|-----------|-------|
+| Subagents | bring-your-own | 7 ready, role-tuned |
+| Browser automation | shell only | Playwright MCP |
+| A11y / perf | none | axe + Chrome DevTools MCP |
+| Security tools | none | nuclei + scope gating |
+| Red-team gate | n/a | hard scope-file requirement |
+| Test layout | none | conventional `tests/` tree |
 
-If you use pi or other coding agents for open source work, please share your sessions.
+If you are writing application code, use `pi`. If you are testing it, use `qa-pi`.
 
-Public OSS session data helps improve coding agents with real-world tasks, tool use, failures, and fixes instead of toy benchmarks.
-
-For the full explanation, see [this post on X](https://x.com/badlogicgames/status/2037811643774652911).
-
-To publish sessions, use [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf). Read its README.md for setup instructions. All you need is a Hugging Face account, the Hugging Face CLI, and `pi-share-hf`.
-
-You can also watch [this video](https://x.com/badlogicgames/status/2041151967695634619), where I show how I publish my `pi-mono` sessions.
-
-I regularly publish my own `pi-mono` work sessions here:
-
-- [badlogicgames/pi-mono on Hugging Face](https://huggingface.co/datasets/badlogicgames/pi-mono)
-
-## Packages
-
-| Package | Description |
-|---------|-------------|
-| **[@mariozechner/pi-ai](packages/ai)** | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
-| **[@mariozechner/pi-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
-| **[@mariozechner/pi-coding-agent](packages/coding-agent)** | Interactive coding agent CLI |
-| **[@mariozechner/pi-tui](packages/tui)** | Terminal UI library with differential rendering |
-| **[@mariozechner/pi-web-ui](packages/web-ui)** | Web components for AI chat interfaces |
-
-## Chat bot workflows
-
-For Slack/chat automation, see [earendil-works/pi-chat](https://github.com/earendil-works/pi-chat).
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [AGENTS.md](AGENTS.md) for project-specific rules (for both humans and agents).
-
-## Development
+## Quick Start
 
 ```bash
-npm install          # Install all dependencies
-npm run build        # Build all packages
-npm run check        # Lint, format, and type check
-./test.sh            # Run tests (skips LLM-dependent tests without API keys)
-./pi-test.sh         # Run pi from sources (can be run from any directory)
+sudo npm i -g qa-pi
+export ANTHROPIC_API_KEY=sk-ant-...
+qa-pi --version
 ```
 
-> **Note:** `npm run check` requires `npm run build` to be run first. The web-ui package uses `tsc` which needs compiled `.d.ts` files from dependencies.
+Smoke test:
+
+```bash
+cd /path/to/your/app
+qa-pi -p "/qa-plan ./docs/feature-checkout.md"
+```
+
+This invokes `qa-planner` only and writes a plan to stdout. Nothing is executed against the SUT.
+
+Run the full suite once you have a plan:
+
+```bash
+qa-pi -p "/qa-run --plan .qapi/plans/checkout.md"
+```
+
+## The 7 Subagents
+
+| Agent | Model | When to use |
+|-------|-------|-------------|
+| `qa-planner` | opus-4-7 | Start here. Reads spec/PR, emits test matrix and assignments. |
+| `qa-web` | sonnet-4-5 | Browser e2e. Authors Playwright tests and runs them. |
+| `qa-api` | sonnet-4-5 | REST/GraphQL contract + integration tests via curl/jq. |
+| `qa-visual` | sonnet-4-5 | Pixel diffs against baselines + axe a11y audits. |
+| `qa-perf` | sonnet-4-5 | Lighthouse, Core Web Vitals, light load tests. |
+| `qa-security` | opus-4-7 | OWASP Top 10, nuclei, headers, secrets. Scope-gated. |
+| `qa-redteam` | opus-4-7 | Adversarial chains, IDOR, races, prompt injection. **Hard** scope gate. |
+
+See `agents/*.md` for the full system prompt and tools allowlist of each.
+
+## Bundled MCPs
+
+| MCP | Purpose |
+|-----|---------|
+| `@playwright/mcp` | Headless browser drive (navigate, click, screenshot, evaluate). |
+| `chrome-devtools-mcp` | Lighthouse runs, performance traces, coverage. |
+| axe (wrapper) | WCAG 2.2 a11y rule engine and contrast checks. |
+| `@modelcontextprotocol/server-filesystem` | Scoped read/write outside cwd. |
+| `@modelcontextprotocol/server-git` | `status`, `diff`, `log` against the repo. |
+| `@modelcontextprotocol/server-github` | Issues, PRs, reviews. |
+| `mcp-server-time` | Stable timestamps for artifact naming. |
+| nuclei (wrapper) | Template-based vulnerability scanning. |
+
+Configuration: `~/.qapi/agent/qa-mcp.json`. See `MCP-SETUP.md`.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  U[User / CI] --> O[qa-pi orchestrator]
+  O -->|spawn child pi| P[qa-planner]
+  O -->|spawn child pi| W[qa-web]
+  O -->|spawn child pi| A[qa-api]
+  O -->|spawn child pi| V[qa-visual]
+  O -->|spawn child pi| F[qa-perf]
+  O -->|spawn child pi| S[qa-security]
+  O -->|spawn child pi| R[qa-redteam]
+  W & V & F & R --> B[MCP-bridge ext]
+  S & A --> B
+  B --> M1[Playwright MCP]
+  B --> M2[Chrome DevTools MCP]
+  B --> M3[axe MCP]
+  B --> M4[nuclei MCP]
+  B --> M5[fs/git/github/time MCPs]
+  M1 & M2 & M3 & M4 --> SUT[(Target SUT)]
+```
+
+Full breakdown in `ARCHITECTURE.md`.
+
+## Workflows
+
+Plan only:
+
+```bash
+qa-pi -p "/qa-plan ./SPEC.md"
+```
+
+Full suite (planner → all executors in parallel where safe):
+
+```bash
+qa-pi -p "/qa-full ./SPEC.md"
+```
+
+Smoke (web + api happy paths only):
+
+```bash
+qa-pi -p "/qa-smoke"
+```
+
+Regression on a specific PR:
+
+```bash
+qa-pi -p "/qa-regress --base main --head feature/checkout"
+```
+
+Security-only run (requires `.qapi/security/scope.json`):
+
+```bash
+qa-pi -p "/qa-security"
+```
+
+Red-team (requires `.qapi/redteam/scope.json` with `confirmed: true`):
+
+```bash
+qa-pi -p "/qa-redteam"
+```
+
+## Configuration
+
+`~/.qapi/agent/settings.json`:
+
+```json
+{
+  "concurrency": 4,
+  "defaultModel": "claude-sonnet-4-5",
+  "plannerModel": "claude-opus-4-7",
+  "mcpConfigPath": "~/.qapi/agent/qa-mcp.json",
+  "artifactsDir": ".qapi/reports",
+  "redteam": { "requireScope": true },
+  "security": { "requireScope": true },
+  "telemetry": false
+}
+```
+
+Per-repo overrides go in `<repo>/.qapi/agent.json` and merge over the user-level file.
+
+## Roadmap
+
+- v0.1 — 7 subagents, MCP-bridge, plan/full/smoke/regress workflows.
+- v0.2 — Test result diffing across runs, GitHub PR comments via `mcp_github_*`.
+- v0.3 — Mobile (Appium MCP), API fuzzing (RESTler/Schemathesis).
+- v0.4 — Self-hosted result dashboard.
+- v1.0 — Stable agent contract, plugin marketplace.
+
+## Credits
+
+- Based on [`pi-mono`](https://github.com/badlogic/pi-mono) by [@badlogic](https://github.com/badlogic) — qa-pi reuses pi's TUI, session, and extension primitives. All upstream credit and gratitude.
+- Playwright, Chrome DevTools, axe-core, nuclei: their respective authors.
 
 ## License
 
-MIT
+MIT. See `LICENSE`.
+
+---
+
+© 2026 [bytak.in](https://bytak.in) — built by Tak1tak
