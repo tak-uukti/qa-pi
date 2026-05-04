@@ -373,6 +373,228 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+// ---------- memory tool + auto-injection ----------
+
+	const MEMORY_DIR = path.join(os.homedir(), ".qapi");
+	const MEMORY_FILE = path.join(MEMORY_DIR, "memory.md");
+	const USER_FILE = path.join(MEMORY_DIR, "user.md");
+	const MEMORY_SEP = "\n§\n";
+	const MEMORY_MAX_BYTES = 50 * 1024;
+
+	function readMemoryFile(p: string): string {
+		try {
+			return fs.readFileSync(p, "utf-8");
+		} catch {
+			return "";
+		}
+	}
+
+	function writeMemoryFile(p: string, content: string): void {
+		fs.mkdirSync(path.dirname(p), { recursive: true });
+		fs.writeFileSync(p, content, "utf-8");
+	}
+
+	function memoryFilePathFor(target: "memory" | "user"): string {
+		return target === "user" ? USER_FILE : MEMORY_FILE;
+	}
+
+	const MemoryParams = Type.Object({
+		action: Type.Union([
+			Type.Literal("add"),
+			Type.Literal("replace"),
+			Type.Literal("remove"),
+		]),
+		target: Type.Optional(
+			Type.Union([Type.Literal("memory"), Type.Literal("user")]),
+		),
+		content: Type.Optional(Type.String()),
+		old_text: Type.Optional(Type.String()),
+	});
+
+	pi.registerTool?.({
+		name: "memory",
+		label: "Memory",
+		description:
+			"Persist notes across qa-pi sessions. Targets: 'memory' (your notes) or 'user' (user profile). Actions: add (new entry), replace (update by old_text substring), remove (delete by old_text substring). Auto-injected at the top of every turn.",
+		parameters: MemoryParams,
+		async execute(
+			_id: string,
+			params: {
+				action: string;
+				target?: string;
+				content?: string;
+				old_text?: string;
+			},
+		): Promise<{
+			content: Array<{ type: "text"; text: string }>;
+			details: Record<string, unknown>;
+		}> {
+			const target = (params.target === "user" ? "user" : "memory") as
+				| "memory"
+				| "user";
+			const fp = memoryFilePathFor(target);
+			const current = readMemoryFile(fp);
+			let next = current;
+			let msg = "";
+
+			if (params.action === "add") {
+				if (!params.content) {
+					return {
+						content: [
+							{ type: "text", text: "memory.add: 'content' is required" },
+						],
+						details: { error: "missing_content" },
+					};
+				}
+				next =
+					current.length > 0
+						? `${current}${MEMORY_SEP}${params.content}`
+						: params.content;
+				msg = `Added entry to ${target} (${Buffer.byteLength(next, "utf-8")} bytes total).`;
+			} else if (params.action === "replace") {
+				if (!params.old_text || !params.content) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: "memory.replace: 'old_text' and 'content' are required",
+							},
+						],
+						details: { error: "missing_fields" },
+					};
+				}
+				const parts = current.length > 0 ? current.split(MEMORY_SEP) : [];
+				const idx = parts.findIndex((p) => p.includes(params.old_text!));
+				if (idx < 0) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: "memory.replace: no entry contains old_text",
+							},
+						],
+						details: { error: "not_found" },
+					};
+				}
+				parts[idx] = params.content;
+				next = parts.join(MEMORY_SEP);
+				msg = `Replaced entry ${idx} in ${target}.`;
+			} else if (params.action === "remove") {
+				if (!params.old_text) {
+					return {
+						content: [
+							{ type: "text", text: "memory.remove: 'old_text' is required" },
+						],
+						details: { error: "missing_old_text" },
+					};
+				}
+				const parts = current.length > 0 ? current.split(MEMORY_SEP) : [];
+				const idx = parts.findIndex((p) => p.includes(params.old_text!));
+				if (idx < 0) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: "memory.remove: no entry contains old_text",
+							},
+						],
+						details: { error: "not_found" },
+					};
+				}
+				parts.splice(idx, 1);
+				next = parts.join(MEMORY_SEP);
+				msg = `Removed entry ${idx} from ${target}.`;
+			} else {
+				return {
+					content: [{ type: "text", text: `unknown action: ${params.action}` }],
+					details: { error: "bad_action" },
+				};
+			}
+
+			const sizeBytes = Buffer.byteLength(next, "utf-8");
+			if (sizeBytes > MEMORY_MAX_BYTES) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Refused: ${target} would exceed ${MEMORY_MAX_BYTES} bytes`,
+						},
+					],
+					details: { error: "too_large" },
+				};
+			}
+
+			writeMemoryFile(fp, next);
+			return {
+				content: [{ type: "text", text: msg }],
+				details: {
+					target,
+					action: params.action,
+					file_path: fp,
+					size_bytes: sizeBytes,
+				},
+			};
+		},
+	});
+
+	// Auto-inject memory into every turn's context.
+	// AgentMessage = UserMessage | AssistantMessage | ToolResultMessage (no system role).
+	// UserMessage.content is `string | (TextContent | ImageContent)[]`.
+	// Strategy: prepend the banner to the FIRST user message; if none, unshift a synthetic user message.
+	pi.on?.("context", async (event) => {
+		const memText = readMemoryFile(MEMORY_FILE).trim();
+		const userText = readMemoryFile(USER_FILE).trim();
+		if (!memText && !userText) return {};
+
+		const lines: string[] = [
+			"",
+			"════════════════",
+			"PERSISTENT MEMORY (qa-pi self-evolution)",
+			"════════════════",
+			"",
+		];
+		if (userText) lines.push("USER PROFILE:", userText, "");
+		if (memText) lines.push("MEMORY:", memText, "");
+		const banner = lines.join("\n");
+
+		const messages = event.messages.slice();
+		const firstUserIdx = messages.findIndex(
+			(m) => (m as { role?: string }).role === "user",
+		);
+
+		if (firstUserIdx >= 0) {
+			const original = messages[firstUserIdx] as {
+				role: "user";
+				content:
+					| string
+					| Array<
+							| { type: "text"; text: string }
+							| { type: "image"; data: string; mimeType: string }
+						>;
+				timestamp: number;
+			};
+			if (typeof original.content === "string") {
+				messages[firstUserIdx] = {
+					...original,
+					content: `${banner}\n\n${original.content}`,
+				} as (typeof messages)[number];
+			} else if (Array.isArray(original.content)) {
+				messages[firstUserIdx] = {
+					...original,
+					content: [{ type: "text", text: banner }, ...original.content],
+				} as (typeof messages)[number];
+			}
+		} else {
+			messages.unshift({
+				role: "user",
+				content: banner,
+				timestamp: Date.now(),
+			} as (typeof messages)[number]);
+		}
+
+		return { messages };
+	});
+
 	pi.on?.("session_end", async () => {
 		for (const c of mcpClients.values()) c.stop();
 		mcpClients.clear();
