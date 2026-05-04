@@ -1353,6 +1353,287 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// ---------- session_search FTS5 tool ----------
+
+	const SESSIONS_DIR = path.join(os.homedir(), ".qapi", "agent", "sessions");
+	const SESSIONS_DB = path.join(os.homedir(), ".qapi", "sessions.db");
+	const SESSION_FILE_MIN_BYTES = 100;
+
+	// Optional sqlite driver — discovered at first use via require (createRequire),
+	// not via dynamic ES import. AGENTS.md forbids inline ES imports for TYPES;
+	// runtime require of an optional native module is the conventional pattern.
+	const sessionRequire = createRequire(import.meta.url);
+
+	function loadSqlite(): { kind: "node" | "better"; api: unknown } | null {
+		try {
+			const m = sessionRequire("node:sqlite");
+			return { kind: "node", api: m };
+		} catch {}
+		try {
+			const Database = sessionRequire("better-sqlite3");
+			return { kind: "better", api: Database };
+		} catch {}
+		return null;
+	}
+
+	type SqliteDb = {
+		exec: (sql: string) => void;
+		prepare: (sql: string) => {
+			all: (...params: unknown[]) => unknown[];
+			run: (...params: unknown[]) => unknown;
+			get: (...params: unknown[]) => unknown;
+		};
+		close: () => void;
+	};
+
+	function openDb(driver: { kind: "node" | "better"; api: unknown }): SqliteDb {
+		if (driver.kind === "better") {
+			const Database = driver.api as new (p: string) => SqliteDb;
+			return new Database(SESSIONS_DB);
+		}
+		// node:sqlite — DatabaseSync API
+		const { DatabaseSync } = driver.api as { DatabaseSync: new (p: string) => SqliteDb };
+		return new DatabaseSync(SESSIONS_DB);
+	}
+
+	function initSchema(db: SqliteDb): void {
+		db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS sessions USING fts5(
+			session_id UNINDEXED,
+			source UNINDEXED,
+			when_iso UNINDEXED,
+			role UNINDEXED,
+			preview UNINDEXED,
+			content
+		);`);
+		db.exec(`CREATE TABLE IF NOT EXISTS index_meta (
+			filename TEXT PRIMARY KEY,
+			indexed_at_ms INTEGER NOT NULL
+		);`);
+	}
+
+	function listSessionFiles(): string[] {
+		if (!fs.existsSync(SESSIONS_DIR)) return [];
+		const out: string[] = [];
+		const walk = (d: string, depth: number): void => {
+			if (depth > 4) return;
+			let entries: fs.Dirent[];
+			try {
+				entries = fs.readdirSync(d, { withFileTypes: true });
+			} catch {
+				return;
+			}
+			for (const e of entries) {
+				const full = path.join(d, e.name);
+				if (e.isDirectory()) {
+					walk(full, depth + 1);
+				} else if (e.isFile() && e.name.endsWith(".jsonl")) {
+					out.push(full);
+				}
+			}
+		};
+		walk(SESSIONS_DIR, 0);
+		return out;
+	}
+
+	function extractSessionContent(filePath: string): { content: string; role: string } | null {
+		try {
+			const raw = fs.readFileSync(filePath, "utf-8");
+			const lines = raw.split(/\r?\n/);
+			const pieces: string[] = [];
+			let lastRole = "mixed";
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				let ev: Record<string, unknown>;
+				try {
+					ev = JSON.parse(line) as Record<string, unknown>;
+				} catch {
+					continue;
+				}
+				const role = typeof ev.role === "string" ? (ev.role as string) : null;
+				if (role) lastRole = role;
+				const text = typeof ev.text === "string" ? (ev.text as string) : null;
+				if (text) pieces.push(text);
+				const content = ev.content;
+				if (typeof content === "string") {
+					pieces.push(content);
+				} else if (Array.isArray(content)) {
+					for (const part of content as Array<Record<string, unknown>>) {
+						if (part && typeof part.text === "string") pieces.push(part.text as string);
+					}
+				}
+			}
+			if (pieces.length === 0) return null;
+			return { content: pieces.join("\n"), role: lastRole };
+		} catch {
+			return null;
+		}
+	}
+
+	function buildOrRefreshIndex(db: SqliteDb): { indexed: number; skipped: number } {
+		initSchema(db);
+		const metaRows = db.prepare("SELECT filename, indexed_at_ms FROM index_meta").all() as Array<{
+			filename: string;
+			indexed_at_ms: number;
+		}>;
+		const metaMap = new Map<string, number>();
+		for (const r of metaRows) metaMap.set(r.filename, r.indexed_at_ms);
+
+		const files = listSessionFiles();
+		let indexed = 0;
+		let skipped = 0;
+
+		const del = db.prepare("DELETE FROM sessions WHERE session_id = ?");
+		const ins = db.prepare(
+			"INSERT INTO sessions (session_id, source, when_iso, role, preview, content) VALUES (?, ?, ?, ?, ?, ?)",
+		);
+		const upMeta = db.prepare(
+			"INSERT INTO index_meta (filename, indexed_at_ms) VALUES (?, ?) ON CONFLICT(filename) DO UPDATE SET indexed_at_ms = excluded.indexed_at_ms",
+		);
+
+		for (const file of files) {
+			let stat: fs.Stats;
+			try {
+				stat = fs.statSync(file);
+			} catch {
+				skipped++;
+				continue;
+			}
+			if (stat.size < SESSION_FILE_MIN_BYTES) {
+				skipped++;
+				continue;
+			}
+			const mtime = stat.mtimeMs;
+			const prev = metaMap.get(file);
+			if (prev !== undefined && prev >= mtime) continue;
+
+			const extracted = extractSessionContent(file);
+			if (!extracted) {
+				skipped++;
+				continue;
+			}
+			const sessionId = path.basename(file, ".jsonl");
+			const whenIso = new Date(mtime).toISOString();
+			const preview = extracted.content.slice(0, 240).replace(/\s+/g, " ");
+			del.run(sessionId);
+			ins.run(sessionId, "local", whenIso, extracted.role, preview, extracted.content);
+			upMeta.run(file, Math.floor(mtime));
+			indexed++;
+		}
+
+		return { indexed, skipped };
+	}
+
+	const SessionSearchParams = Type.Object({
+		query: Type.Optional(Type.String({ description: "FTS5 query. Omit to list recent sessions." })),
+		limit: Type.Optional(Type.Number({ description: "Max results", default: 3 })),
+		role_filter: Type.Optional(Type.String({ description: "Comma-separated role filter (user,assistant,tool)" })),
+	});
+
+	pi.registerTool?.({
+		name: "session_search",
+		label: "Session Search",
+		description:
+			"Search past qa-pi sessions by keyword (FTS5). Omit query to list recent sessions. Lazy-indexed at ~/.qapi/sessions.db; only changed files re-index. Requires node:sqlite (Node ≥22.5) or better-sqlite3; gracefully no-ops if neither available.",
+		parameters: SessionSearchParams,
+		async execute(_id, params: { query?: string; limit?: number; role_filter?: string }) {
+			const driver = loadSqlite();
+			if (!driver) {
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								"session_search unavailable: no sqlite driver found. Install better-sqlite3 in qa-pi or upgrade to Node ≥22.5 with node:sqlite to enable past-session recall.",
+						},
+					],
+					details: { error: "no_sqlite_driver" },
+				};
+			}
+			let db: SqliteDb;
+			try {
+				db = openDb(driver);
+			} catch (e) {
+				return {
+					content: [{ type: "text", text: `session_search: failed to open db: ${(e as Error).message}` }],
+					details: { error: "db_open_failed" },
+				};
+			}
+			try {
+				const stats = buildOrRefreshIndex(db);
+				const limit = Math.max(1, Math.min(20, params.limit ?? 3));
+				const roleFilter = params.role_filter
+					? params.role_filter.split(",").map((s) => s.trim()).filter(Boolean)
+					: null;
+
+				let results: Array<{ session_id: string; when: string; preview: string; score?: number }> = [];
+				if (!params.query || params.query.trim() === "") {
+					let sql =
+						"SELECT session_id, when_iso, preview, role FROM sessions";
+					const args: unknown[] = [];
+					if (roleFilter && roleFilter.length > 0) {
+						sql += ` WHERE role IN (${roleFilter.map(() => "?").join(",")})`;
+						args.push(...roleFilter);
+					}
+					sql += " ORDER BY when_iso DESC LIMIT ?";
+					args.push(limit);
+					const rows = db.prepare(sql).all(...args) as Array<{
+						session_id: string;
+						when_iso: string;
+						preview: string;
+						role: string;
+					}>;
+					results = rows.map((r) => ({ session_id: r.session_id, when: r.when_iso, preview: r.preview }));
+				} else {
+					let sql =
+						"SELECT session_id, when_iso, preview, role, bm25(sessions) AS score FROM sessions WHERE sessions MATCH ?";
+					const args: unknown[] = [params.query];
+					if (roleFilter && roleFilter.length > 0) {
+						sql += ` AND role IN (${roleFilter.map(() => "?").join(",")})`;
+						args.push(...roleFilter);
+					}
+					sql += " ORDER BY score ASC LIMIT ?";
+					args.push(limit);
+					const rows = db.prepare(sql).all(...args) as Array<{
+						session_id: string;
+						when_iso: string;
+						preview: string;
+						role: string;
+						score: number;
+					}>;
+					results = rows.map((r) => ({
+						session_id: r.session_id,
+						when: r.when_iso,
+						preview: r.preview,
+						score: r.score,
+					}));
+				}
+
+				const lines: string[] = [];
+				lines.push(
+					`Found ${results.length} session(s)${params.query ? ` matching "${params.query}"` : " (most recent)"}. Index: ${stats.indexed} updated, ${stats.skipped} skipped.`,
+				);
+				for (const r of results) {
+					lines.push("");
+					lines.push(`- ${r.session_id} (${r.when})${r.score !== undefined ? ` [score=${r.score.toFixed(3)}]` : ""}`);
+					lines.push(`  ${r.preview}`);
+				}
+				return {
+					content: [{ type: "text", text: lines.join("\n") }],
+					details: { count: results.length, results, index_stats: stats },
+				};
+			} catch (e) {
+				return {
+					content: [{ type: "text", text: `session_search error: ${(e as Error).message}` }],
+					details: { error: "exception" },
+				};
+			} finally {
+				try {
+					db.close();
+				} catch {}
+			}
+		},
+	});
+
 		pi.on?.("session_end", async () => {
 		for (const c of mcpClients.values()) c.stop();
 		mcpClients.clear();
