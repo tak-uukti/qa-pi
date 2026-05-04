@@ -16,6 +16,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@tak-uukti/qa-pi";
+import { getAgentDir, loadSkills } from "@tak-uukti/qa-pi";
 import { Type } from "typebox";
 
 // ---------- agent discovery (lifted from upstream subagent example, simplified) ----------
@@ -595,7 +596,764 @@ export default function (pi: ExtensionAPI) {
 		return { messages };
 	});
 
-	pi.on?.("session_end", async () => {
+// ---------- skill_view + skill_manage tools ----------
+
+	const SKILLS_ROOT = path.join(os.homedir(), ".qapi", "agent", "skills");
+	const SKILL_LINKED_DIRS = [
+		"references",
+		"templates",
+		"scripts",
+		"assets",
+	] as const;
+	const SKILL_FILE_MAX_BYTES = 256 * 1024;
+	const SKILL_STANDARD_LAYOUT = new Set<string>([
+		"SKILL.md",
+		...SKILL_LINKED_DIRS,
+	]);
+
+	function ensureUnderSkillsRoot(p: string): string {
+		const root = SKILLS_ROOT;
+		const resolved = path.resolve(p);
+		if (!resolved.startsWith(root + path.sep) && resolved !== root) {
+			throw new Error(`path escapes skills root: ${resolved}`);
+		}
+		return resolved;
+	}
+
+	function ensureUnderDir(parent: string, p: string): string {
+		const resolved = path.resolve(p);
+		const parentNorm = path.resolve(parent);
+		if (
+			resolved !== parentNorm &&
+			!resolved.startsWith(parentNorm + path.sep)
+		) {
+			throw new Error(`path escapes ${parentNorm}: ${resolved}`);
+		}
+		return resolved;
+	}
+
+	function rejectTraversal(rel: string): void {
+		if (path.isAbsolute(rel))
+			throw new Error(`absolute paths not allowed: ${rel}`);
+		const parts = rel.split(/[\\/]+/);
+		if (parts.includes("..")) throw new Error(`path contains '..': ${rel}`);
+	}
+
+	function listSkills(): Array<{
+		name: string;
+		description: string;
+		filePath: string;
+		category?: string;
+		location: string;
+	}> {
+		const result = loadSkills({
+			cwd: process.cwd(),
+			agentDir: getAgentDir(),
+			skillPaths: [],
+			includeDefaults: true,
+		});
+		const out: Array<{
+			name: string;
+			description: string;
+			filePath: string;
+			category?: string;
+			location: string;
+		}> = [];
+		const userSkillsDir = path.join(getAgentDir(), "skills");
+		for (const s of result.skills) {
+			let category: string | undefined;
+			if (s.filePath.startsWith(userSkillsDir + path.sep)) {
+				const rel = path.relative(userSkillsDir, path.dirname(s.filePath));
+				const segs = rel.split(path.sep);
+				if (segs.length > 1) {
+					category = segs.slice(0, -1).join("/");
+				}
+			}
+			out.push({
+				name: s.name,
+				description: s.description,
+				filePath: s.filePath,
+				category,
+				location: s.filePath,
+			});
+		}
+		return out;
+	}
+
+	function listLinkedFiles(skillDir: string): Record<string, string[]> {
+		const linked: Record<string, string[]> = {};
+		for (const sub of SKILL_LINKED_DIRS) {
+			const dir = path.join(skillDir, sub);
+			if (!fs.existsSync(dir)) continue;
+			try {
+				const files = fs
+					.readdirSync(dir, { withFileTypes: true })
+					.filter((e) => e.isFile())
+					.map((e) => path.join(sub, e.name));
+				if (files.length > 0) linked[sub] = files;
+			} catch {
+				/* ignore */
+			}
+		}
+		return linked;
+	}
+
+	const SkillsListParams = Type.Object({
+		category: Type.Optional(
+			Type.String({ description: "Filter by category dir prefix" }),
+		),
+	});
+
+	pi.registerTool?.({
+		name: "skills_list",
+		label: "List Skills",
+		description:
+			"List available skills (bundled + user + project). Optionally filter by category prefix. Returns skill names, descriptions, and locations.",
+		parameters: SkillsListParams,
+		async execute(_id: string, params: { category?: string }) {
+			let skills = listSkills();
+			if (params.category) {
+				const prefix = params.category.replace(/\\/g, "/");
+				skills = skills.filter(
+					(s) => s.category && s.category.startsWith(prefix),
+				);
+			}
+			const lines: string[] = [];
+			lines.push(`Found ${skills.length} skill(s).`);
+			lines.push("");
+			for (const s of skills) {
+				const cat = s.category ? ` [${s.category}]` : "";
+				lines.push(`- **${s.name}**${cat}: ${s.description}`);
+				lines.push(`  ${s.filePath}`);
+			}
+			return {
+				content: [{ type: "text", text: lines.join("\n") }],
+				details: {
+					count: skills.length,
+					skills: skills.map((s) => ({
+						name: s.name,
+						description: s.description,
+						location: s.location,
+						category: s.category,
+					})),
+				},
+			};
+		},
+	});
+
+	const SkillViewParams = Type.Object({
+		name: Type.String(),
+		file_path: Type.Optional(
+			Type.String({
+				description:
+					"Path to a linked file inside the skill (e.g. references/api.md)",
+			}),
+		),
+	});
+
+	pi.registerTool?.({
+		name: "skill_view",
+		label: "View Skill",
+		description:
+			"Read a skill's SKILL.md or a linked file inside the skill directory (references/, templates/, scripts/, assets/). Use skills_list first to discover names.",
+		parameters: SkillViewParams,
+		async execute(_id: string, params: { name: string; file_path?: string }) {
+			const skills = listSkills();
+			const skill = skills.find((s) => s.name === params.name);
+			if (!skill) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `skill not found: ${params.name}. Use skills_list to enumerate.`,
+						},
+					],
+					details: { error: "not_found", name: params.name },
+				};
+			}
+			const skillDir = path.dirname(skill.filePath);
+
+			if (params.file_path) {
+				try {
+					rejectTraversal(params.file_path);
+				} catch (e) {
+					return {
+						content: [
+							{ type: "text", text: `rejected: ${(e as Error).message}` },
+						],
+						details: { error: "bad_path", file_path: params.file_path },
+					};
+				}
+				const targetUnchecked = path.resolve(skillDir, params.file_path);
+				let target: string;
+				try {
+					target = ensureUnderDir(skillDir, targetUnchecked);
+				} catch (e) {
+					return {
+						content: [
+							{ type: "text", text: `rejected: ${(e as Error).message}` },
+						],
+						details: { error: "out_of_sandbox" },
+					};
+				}
+				if (!fs.existsSync(target)) {
+					return {
+						content: [{ type: "text", text: `file not found: ${target}` }],
+						details: { error: "not_found", path: target },
+					};
+				}
+				const stat = fs.statSync(target);
+				if (stat.size > SKILL_FILE_MAX_BYTES) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `file too large (${stat.size} bytes > ${SKILL_FILE_MAX_BYTES}). Read it directly with the read tool if needed.`,
+							},
+						],
+						details: {
+							error: "too_large",
+							path: target,
+							size_bytes: stat.size,
+						},
+					};
+				}
+				const text = fs.readFileSync(target, "utf-8");
+				return {
+					content: [{ type: "text", text }],
+					details: {
+						name: skill.name,
+						path: target,
+						skill_dir: skillDir,
+					},
+				};
+			}
+
+			const text = fs.readFileSync(skill.filePath, "utf-8");
+			const linked = listLinkedFiles(skillDir);
+			return {
+				content: [{ type: "text", text }],
+				details: {
+					name: skill.name,
+					path: skill.filePath,
+					skill_dir: skillDir,
+					linked_files: linked,
+				},
+			};
+		},
+	});
+
+	const SkillManageParams = Type.Object({
+		action: Type.Union([
+			Type.Literal("create"),
+			Type.Literal("patch"),
+			Type.Literal("edit"),
+			Type.Literal("delete"),
+			Type.Literal("write_file"),
+			Type.Literal("remove_file"),
+		]),
+		name: Type.String(),
+		category: Type.Optional(Type.String()),
+		content: Type.Optional(Type.String()),
+		file_path: Type.Optional(Type.String()),
+		file_content: Type.Optional(Type.String()),
+		old_string: Type.Optional(Type.String()),
+		new_string: Type.Optional(Type.String()),
+		replace_all: Type.Optional(Type.Boolean()),
+	});
+
+	function findUserSkillDir(name: string): string | null {
+		// Search user skills root for a directory whose immediate child SKILL.md
+		// belongs to a folder named `name`. Recurse one level for grouping.
+		if (!fs.existsSync(SKILLS_ROOT)) return null;
+		// First: SKILLS_ROOT/<name>/SKILL.md
+		const direct = path.join(SKILLS_ROOT, name);
+		if (
+			fs.existsSync(path.join(direct, "SKILL.md")) &&
+			fs.statSync(direct).isDirectory()
+		) {
+			return direct;
+		}
+		// Then: SKILLS_ROOT/<category>/<name>/SKILL.md
+		try {
+			for (const entry of fs.readdirSync(SKILLS_ROOT, {
+				withFileTypes: true,
+			})) {
+				if (!entry.isDirectory()) continue;
+				const candidate = path.join(SKILLS_ROOT, entry.name, name);
+				if (
+					fs.existsSync(path.join(candidate, "SKILL.md")) &&
+					fs.statSync(candidate).isDirectory()
+				) {
+					return candidate;
+				}
+			}
+		} catch {
+			/* ignore */
+		}
+		return null;
+	}
+
+	function rmrf(target: string): void {
+		fs.rmSync(target, { recursive: true, force: true });
+	}
+
+	function listAllRelEntries(dir: string): string[] {
+		const out: string[] = [];
+		const walk = (cur: string, rel: string) => {
+			let entries: fs.Dirent[];
+			try {
+				entries = fs.readdirSync(cur, { withFileTypes: true });
+			} catch {
+				return;
+			}
+			for (const e of entries) {
+				const childRel = rel ? path.join(rel, e.name) : e.name;
+				out.push(childRel + (e.isDirectory() ? "/" : ""));
+				if (e.isDirectory()) walk(path.join(cur, e.name), childRel);
+			}
+		};
+		walk(dir, "");
+		return out;
+	}
+
+	function isStandardLayoutEntry(rel: string): boolean {
+		// rel may end with "/" for dirs
+		const trimmed = rel.endsWith("/") ? rel.slice(0, -1) : rel;
+		const top = trimmed.split(path.sep)[0];
+		if (!top) return false;
+		return SKILL_STANDARD_LAYOUT.has(top);
+	}
+
+	function isLinkedSubpath(rel: string): boolean {
+		const norm = rel.replace(/\\/g, "/");
+		for (const sub of SKILL_LINKED_DIRS) {
+			if (norm === sub) return false; // bare directory not allowed
+			if (norm.startsWith(sub + "/")) return true;
+		}
+		return false;
+	}
+
+	pi.registerTool?.({
+		name: "skill_manage",
+		label: "Manage Skill",
+		description:
+			"Create, patch, rewrite, or delete a user skill under ~/.qapi/agent/skills/. Actions: create (new SKILL.md), patch (find/replace inside SKILL.md or a linked file), edit (rewrite SKILL.md), delete (remove skill dir), write_file (add a file under references/templates/scripts/assets), remove_file (delete one). All paths sandboxed under skills root.",
+		parameters: SkillManageParams,
+		async execute(
+			_id: string,
+			params: {
+				action: string;
+				name: string;
+				category?: string;
+				content?: string;
+				file_path?: string;
+				file_content?: string;
+				old_string?: string;
+				new_string?: string;
+				replace_all?: boolean;
+			},
+		) {
+			const action = params.action;
+			const name = params.name;
+
+			const restartHint = `(Skills are auto-loaded at session start. Restart the session to see ${name} in the available_skills list.)`;
+
+			try {
+				if (action === "create") {
+					if (!params.content) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: "create: 'content' (SKILL.md body) is required",
+								},
+							],
+							details: { error: "missing_content", action, name },
+						};
+					}
+					if (params.category) {
+						rejectTraversal(params.category);
+					}
+					rejectTraversal(name);
+
+					const skillDir = params.category
+						? path.join(SKILLS_ROOT, params.category, name)
+						: path.join(SKILLS_ROOT, name);
+					ensureUnderSkillsRoot(skillDir);
+
+					if (fs.existsSync(skillDir)) {
+						return {
+							content: [
+								{ type: "text", text: `skill already exists: ${skillDir}` },
+							],
+							details: { error: "exists", action, name, path: skillDir },
+						};
+					}
+					fs.mkdirSync(skillDir, { recursive: true });
+					const skillFile = path.join(skillDir, "SKILL.md");
+					fs.writeFileSync(skillFile, params.content, "utf-8");
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Created skill ${name} at ${skillFile}\n${restartHint}`,
+							},
+						],
+						details: {
+							action,
+							name,
+							path: skillFile,
+							skill_dir: skillDir,
+							category: params.category,
+						},
+					};
+				}
+
+				if (action === "edit") {
+					if (!params.content) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: "edit: 'content' (full SKILL.md) is required",
+								},
+							],
+							details: { error: "missing_content", action, name },
+						};
+					}
+					const skillDir = findUserSkillDir(name);
+					if (!skillDir) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `skill not found under user dir: ${name}. Use 'create' for new skills.`,
+								},
+							],
+							details: { error: "not_found", action, name },
+						};
+					}
+					ensureUnderSkillsRoot(skillDir);
+					const skillFile = path.join(skillDir, "SKILL.md");
+					if (!fs.existsSync(skillFile)) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `SKILL.md missing in ${skillDir}. Use 'create' instead.`,
+								},
+							],
+							details: { error: "missing_skill_md", action, name },
+						};
+					}
+					fs.writeFileSync(skillFile, params.content, "utf-8");
+					return {
+						content: [{ type: "text", text: `Rewrote ${skillFile}` }],
+						details: {
+							action,
+							name,
+							path: skillFile,
+							skill_dir: skillDir,
+						},
+					};
+				}
+
+				if (action === "patch") {
+					if (params.old_string == null || params.new_string == null) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: "patch: 'old_string' and 'new_string' are required",
+								},
+							],
+							details: { error: "missing_fields", action, name },
+						};
+					}
+					const skillDir = findUserSkillDir(name);
+					if (!skillDir) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `skill not found under user dir: ${name}`,
+								},
+							],
+							details: { error: "not_found", action, name },
+						};
+					}
+					ensureUnderSkillsRoot(skillDir);
+					const relTarget = params.file_path ?? "SKILL.md";
+					rejectTraversal(relTarget);
+					const target = ensureUnderDir(
+						skillDir,
+						path.resolve(skillDir, relTarget),
+					);
+					if (!fs.existsSync(target)) {
+						return {
+							content: [{ type: "text", text: `file not found: ${target}` }],
+							details: { error: "not_found", action, name, path: target },
+						};
+					}
+					const original = fs.readFileSync(target, "utf-8");
+					const occurrences = original.split(params.old_string).length - 1;
+					if (occurrences === 0) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `patch: old_string not found in ${target}`,
+								},
+							],
+							details: { error: "not_found", action, name, path: target },
+						};
+					}
+					if (occurrences > 1 && params.replace_all !== true) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `patch: old_string found ${occurrences}x in ${target}; pass replace_all:true or supply more context.`,
+								},
+							],
+							details: {
+								error: "not_unique",
+								action,
+								name,
+								path: target,
+								occurrences,
+							},
+						};
+					}
+					const updated = params.replace_all
+						? original.split(params.old_string).join(params.new_string)
+						: original.replace(params.old_string, params.new_string);
+					fs.writeFileSync(target, updated, "utf-8");
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Patched ${target} (${occurrences} occurrence${occurrences === 1 ? "" : "s"}${params.replace_all ? ", replace_all" : ""}).`,
+							},
+						],
+						details: {
+							action,
+							name,
+							path: target,
+							occurrences,
+							replace_all: !!params.replace_all,
+						},
+					};
+				}
+
+				if (action === "delete") {
+					const skillDir = findUserSkillDir(name);
+					if (!skillDir) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `skill not found under user dir: ${name}`,
+								},
+							],
+							details: { error: "not_found", action, name },
+						};
+					}
+					ensureUnderSkillsRoot(skillDir);
+					const entries = listAllRelEntries(skillDir);
+					const nonStandard = entries.filter(
+						(rel) => !isStandardLayoutEntry(rel),
+					);
+					if (nonStandard.length > 0) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `delete refused: skill contains non-standard files. Move or remove these first:\n${nonStandard.slice(0, 20).join("\n")}`,
+								},
+							],
+							details: {
+								error: "non_standard_files",
+								action,
+								name,
+								path: skillDir,
+								non_standard: nonStandard,
+							},
+						};
+					}
+					rmrf(skillDir);
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Deleted skill ${name} at ${skillDir}\n${restartHint}`,
+							},
+						],
+						details: { action, name, path: skillDir },
+					};
+				}
+
+				if (action === "write_file") {
+					if (!params.file_path) {
+						return {
+							content: [
+								{ type: "text", text: "write_file: 'file_path' is required" },
+							],
+							details: { error: "missing_file_path", action, name },
+						};
+					}
+					if (params.file_content == null) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: "write_file: 'file_content' is required",
+								},
+							],
+							details: { error: "missing_file_content", action, name },
+						};
+					}
+					rejectTraversal(params.file_path);
+					if (!isLinkedSubpath(params.file_path)) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `write_file: file_path must start with one of references/, templates/, scripts/, assets/`,
+								},
+							],
+							details: {
+								error: "bad_subpath",
+								action,
+								name,
+								file_path: params.file_path,
+							},
+						};
+					}
+					const skillDir = findUserSkillDir(name);
+					if (!skillDir) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `skill not found under user dir: ${name}`,
+								},
+							],
+							details: { error: "not_found", action, name },
+						};
+					}
+					ensureUnderSkillsRoot(skillDir);
+					const target = ensureUnderDir(
+						skillDir,
+						path.resolve(skillDir, params.file_path),
+					);
+					ensureUnderSkillsRoot(target);
+					fs.mkdirSync(path.dirname(target), { recursive: true });
+					fs.writeFileSync(target, params.file_content, "utf-8");
+					return {
+						content: [{ type: "text", text: `Wrote ${target}` }],
+						details: {
+							action,
+							name,
+							path: target,
+							skill_dir: skillDir,
+						},
+					};
+				}
+
+				if (action === "remove_file") {
+					if (!params.file_path) {
+						return {
+							content: [
+								{ type: "text", text: "remove_file: 'file_path' is required" },
+							],
+							details: { error: "missing_file_path", action, name },
+						};
+					}
+					rejectTraversal(params.file_path);
+					if (params.file_path === "SKILL.md") {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `remove_file: cannot remove SKILL.md. Use 'delete' to remove the entire skill.`,
+								},
+							],
+							details: { error: "protected_file", action, name },
+						};
+					}
+					if (!isLinkedSubpath(params.file_path)) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `remove_file: file_path must start with one of references/, templates/, scripts/, assets/`,
+								},
+							],
+							details: {
+								error: "bad_subpath",
+								action,
+								name,
+								file_path: params.file_path,
+							},
+						};
+					}
+					const skillDir = findUserSkillDir(name);
+					if (!skillDir) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `skill not found under user dir: ${name}`,
+								},
+							],
+							details: { error: "not_found", action, name },
+						};
+					}
+					ensureUnderSkillsRoot(skillDir);
+					const target = ensureUnderDir(
+						skillDir,
+						path.resolve(skillDir, params.file_path),
+					);
+					ensureUnderSkillsRoot(target);
+					if (!fs.existsSync(target)) {
+						return {
+							content: [{ type: "text", text: `file not found: ${target}` }],
+							details: { error: "not_found", action, name, path: target },
+						};
+					}
+					fs.rmSync(target, { force: true });
+					return {
+						content: [{ type: "text", text: `Removed ${target}` }],
+						details: {
+							action,
+							name,
+							path: target,
+							skill_dir: skillDir,
+						},
+					};
+				}
+
+				return {
+					content: [{ type: "text", text: `unknown action: ${action}` }],
+					details: { error: "bad_action", action, name },
+				};
+			} catch (e) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `skill_manage error: ${(e as Error).message}`,
+						},
+					],
+					details: { error: "exception", action, name },
+				};
+			}
+		},
+	});
+
+		pi.on?.("session_end", async () => {
 		for (const c of mcpClients.values()) c.stop();
 		mcpClients.clear();
 	});
