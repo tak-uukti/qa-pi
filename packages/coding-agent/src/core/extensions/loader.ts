@@ -54,6 +54,8 @@ const VIRTUAL_MODULES: Record<string, unknown> = {
 	"@mariozechner/pi-ai": _bundledPiAi,
 	"@mariozechner/pi-ai/oauth": _bundledPiAiOauth,
 	"@mariozechner/pi-coding-agent": _bundledPiCodingAgent,
+	// qa-pi fork alias — bundled extensions import the package by its forked name.
+	"@tak-uukti/qa-pi": _bundledPiCodingAgent,
 };
 
 const require = createRequire(import.meta.url);
@@ -85,6 +87,7 @@ function getAliases(): Record<string, string> {
 
 	_aliases = {
 		"@mariozechner/pi-coding-agent": packageIndex,
+		"@tak-uukti/qa-pi": packageIndex,
 		"@mariozechner/pi-agent-core": resolveWorkspaceOrImport("agent/dist/index.js", "@mariozechner/pi-agent-core"),
 		"@mariozechner/pi-tui": resolveWorkspaceOrImport("tui/dist/index.js", "@mariozechner/pi-tui"),
 		"@mariozechner/pi-ai": resolveWorkspaceOrImport("ai/dist/index.js", "@mariozechner/pi-ai"),
