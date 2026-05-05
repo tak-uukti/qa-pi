@@ -2064,6 +2064,8 @@ export class AgentSession {
 
 		this._applyExtensionBindings(this._extensionRunner);
 		await this._extensionRunner.emit(this._sessionStartEvent);
+		// Refresh tool registry so extension tools registered during session_start become active
+		this._refreshToolRegistry({ includeAllExtensionTools: true });
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
 	}
 
