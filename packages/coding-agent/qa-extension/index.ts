@@ -110,7 +110,7 @@ async function runSubagent(
 
 	const { command, args: cliArgs } = getQAPiInvocation(args);
 	return new Promise((resolve) => {
-		const child = spawn(command, cliArgs, { cwd, signal, env: process.env });
+		const child = spawn(command, cliArgs, { cwd, signal, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
 		let stdout = "";
 		let stderr = "";
 		child.stdout.on("data", (d) => {
